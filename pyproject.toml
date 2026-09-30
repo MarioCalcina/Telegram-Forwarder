@@ -1,0 +1,11 @@
+[project]
+name = "telegram-forwarder"
+version = "0.1.0"
+description = "Copia archivos entre canales y grupos de Telegram con filtros, temas de foro y reanudacion"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "telethon>=1.42.0",
+    "tqdm>=4.67.3",
+]

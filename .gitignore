@@ -1,0 +1,14 @@
+# Secretos y sesion de Telegram (dan acceso total a la cuenta)
+.env
+*.session
+*.session-journal
+
+# Archivos generados en ejecucion
+*.log
+channel_states.json
+failed_videos.json
+
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
