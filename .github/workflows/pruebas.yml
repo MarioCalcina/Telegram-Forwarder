@@ -19,7 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv no publica etiquetas de version mayor (v10): se fija la version exacta.
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
