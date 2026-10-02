@@ -29,10 +29,12 @@ from reenviador.infraestructura.configuracion import (
 from reenviador.notificaciones.notificador import TelegramNotifier
 from reenviador.progreso.progreso_contiguo import ProgresoContiguo
 from reenviador.progreso.repositorio_estado import ChannelStateRepository
+from reenviador.reenvio.albumes import Item, agrupar_en_lotes
 from reenviador.reenvio.enviador import MessageSender
 from reenviador.reenvio.modelo import ConfirmarEnvio, Estadisticas, ParPorCopiar, PedidoDeReenvio
 from reenviador.seleccion.duplicados import obtener_medios_existentes
 from reenviador.seleccion.filtros import SelectorDeMensajes, normalizar_palabras_clave
+from reenviador.seleccion.indice_destinos import IndiceDeDestinos
 from reenviador.seleccion.tipos_de_medio import normalizar_tipos_archivo
 
 logger = logging.getLogger("telegram_bot")
@@ -94,8 +96,8 @@ async def ejecutar_reenvio(
         stats = Estadisticas()
     stats.canales_procesados = len(channel_mappings)
 
-    # Reutiliza IDs de medios analizados cuando varios mappings apuntan al mismo destino.
-    medios_destino_cache: dict[str, set[str]] = {}
+    # Recuerda los medios de cada destino entre corridas (y entre pares con el mismo destino).
+    indice_destinos = IndiceDeDestinos()
 
     async with TelegramClientWrapper(api_id, api_hash, sesion) as client:
         notifier = TelegramNotifier(client.client, NOTIFICATION_CHAT_ID, ENABLE_NOTIFICATIONS)
@@ -119,7 +121,7 @@ async def ejecutar_reenvio(
                     min_duracion_segundos=min_duracion_segundos,
                     min_duracion_video_minutos=min_duracion_video_minutos,
                     stats=stats,
-                    medios_destino_cache=medios_destino_cache,
+                    indice_destinos=indice_destinos,
                     palabras_clave=palabras_clave,
                     tipos_archivo=tipos_normalizados,
                     topic_id_origen=pedido.topic_id_origen if un_solo_par else None,
@@ -164,7 +166,7 @@ async def procesar_par_canales(
     min_duracion_segundos: float,
     min_duracion_video_minutos: float,
     stats: Estadisticas,
-    medios_destino_cache: dict[str, set[str]],
+    indice_destinos: IndiceDeDestinos,
     palabras_clave: set[str],
     tipos_archivo: set[str],
     topic_id_origen: int | None,
@@ -195,14 +197,9 @@ async def procesar_par_canales(
         if min_duracion_video_minutos > 0 and "video" in tipos_archivo:
             logger.info("Filtro de video activo: %s minutos o mas", min_duracion_video_minutos)
 
+        # El indice es por canal, no por tema: los duplicados se buscan en todo el destino.
         medios_existentes = (
-            await obtener_medios_existentes(
-                client,
-                entidad_destino,
-                destino_key,
-                medios_destino_cache,
-                tipos_archivo,
-            )
+            await obtener_medios_existentes(client, entidad_destino, str(canal_destino), indice_destinos)
             if EVITAR_DUPLICADOS
             else set()
         )
@@ -288,7 +285,7 @@ async def procesar_par_canales(
 
 
 async def procesar_mensajes_paralelo(
-    mensajes: list[tuple[Any, set[str]]],
+    mensajes: list[Item],
     sender: MessageSender,
     entidad_destino: Any,
     state_repo: ChannelStateRepository,
@@ -300,7 +297,7 @@ async def procesar_mensajes_paralelo(
     topic_id_destino: int | None,
     ids_reintento: set[int] | None = None,
 ) -> None:
-    """Procesa mensajes en paralelo con limite de concurrencia."""
+    """Procesa mensajes en paralelo con limite de concurrencia; los albumes van juntos."""
     max_concurrent = max(1, MAX_CONCURRENT_VIDEOS)
     pending: set[asyncio.Task[None]] = set()
     ids_reintento = ids_reintento or set()
@@ -313,17 +310,30 @@ async def procesar_mensajes_paralelo(
     procesados = 0
     total = len(mensajes)
 
-    async def procesar_archivo(item: tuple[Any, set[str]], pbar: tqdm[Any]) -> None:
+    async def procesar_lote(lote: list[Item], pbar: tqdm[Any]) -> None:
+        """Envia un album de una vez; si no se puede, o es un solo mensaje, de a uno."""
+        album_enviado = len(lote) > 1 and await sender.enviar_album(
+            entidad_destino, [mensaje for mensaje, _ in lote], topic_id=topic_id_destino
+        )
+
+        for item in lote:
+            # Cada envio se registra apenas termina: con Ctrl+C a mitad del lote no se
+            # pierde el progreso de los que ya salieron.
+            exito = album_enviado or await sender.enviar_con_reintentos(
+                entidad_destino,
+                item[0],
+                canal_origen=canal_origen,
+                canal_destino=canal_destino,
+                topic_id=topic_id_destino,
+            )
+            registrar_envio(item, exito, pbar)
+
+        if max_concurrent == 1 and DELAY_ENTRE_MENSAJES > 0:
+            await asyncio.sleep(DELAY_ENTRE_MENSAJES)
+
+    def registrar_envio(item: Item, exito: bool, pbar: tqdm[Any]) -> None:
         nonlocal guardados_desde_flush, procesados
         mensaje, keys_seleccionadas = item
-
-        exito = await sender.enviar_con_reintentos(
-            entidad_destino,
-            mensaje,
-            canal_origen=canal_origen,
-            canal_destino=canal_destino,
-            topic_id=topic_id_destino,
-        )
 
         if exito:
             if EVITAR_DUPLICADOS:
@@ -355,13 +365,10 @@ async def procesar_mensajes_paralelo(
                 {"copiados": stats.copiados, "omitidos": stats.omitidos, "fallidos": stats.fallidos}
             )
 
-        if max_concurrent == 1 and DELAY_ENTRE_MENSAJES > 0:
-            await asyncio.sleep(DELAY_ENTRE_MENSAJES)
-
     try:
         with _log_sobre_la_barra(), tqdm(total=total, desc="Procesando archivos", unit="archivo") as pbar:
-            for item in mensajes:
-                pending.add(asyncio.create_task(procesar_archivo(item, pbar)))
+            for lote in agrupar_en_lotes(mensajes):
+                pending.add(asyncio.create_task(procesar_lote(lote, pbar)))
 
                 if len(pending) >= max_concurrent:
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)

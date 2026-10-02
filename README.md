@@ -10,7 +10,8 @@ El flujo de ejecucion es interactivo: al iniciar te guia paso a paso para elegir
 - Soporte de tipos: `video`, `photo`, `audio`, `document`, `voice`, `gif`, `sticker`.
 - Filtro por temas/palabras clave en texto o caption.
 - Filtro de duracion minima para videos.
-- Deteccion de duplicados en destino (opcional).
+- Deteccion de duplicados en destino (opcional), con un indice que evita recorrer el destino entero en cada corrida.
+- Los albumes (varias fotos o videos publicados juntos) se reenvian como album.
 - Reintentos automaticos con backoff exponencial.
 - Manejo de `FloodWait` (rate limit de Telegram).
 - Dead Letter Queue en `failed_videos.json` para mensajes que fallan despues de reintentos.
@@ -29,12 +30,14 @@ reenviador/
 │   ├── modelo.py            #   PedidoDeReenvio, ParPorCopiar y Estadisticas
 │   ├── reenviar_archivos.py #   orquesta cada par origen -> destino
 │   ├── enviador.py          #   envio con reintentos, FloodWait y caption largo
+│   ├── albumes.py           #   agrupa los mensajes de un album para enviarlos juntos
 │   ├── reintentos.py        #   backoff exponencial
 │   └── caption.py           #   truncado seguro del caption
 ├── seleccion/               # que mensajes se copian
 │   ├── tipos_de_medio.py    #   clasificacion video/foto/gif/sticker/...
 │   ├── filtros.py           #   duracion, palabras clave y SelectorDeMensajes
-│   └── duplicados.py        #   medios que ya existen en destino
+│   ├── duplicados.py        #   medios que ya existen en destino
+│   └── indice_destinos.py   #   indice guardado: solo se revisa lo nuevo del destino
 ├── progreso/                # reanudar donde quedo
 │   ├── repositorio_estado.py
 │   └── progreso_contiguo.py #   que ID es seguro guardar con envios concurrentes
@@ -202,6 +205,11 @@ Si la lista no se pudo cargar (por ejemplo, sin conexion), el asistente vuelve a
 - Duplicados:
   - Si `EVITAR_DUPLICADOS=True`, analiza el destino y evita reenviar medios ya vistos.
   - Tambien evita duplicados dentro de la misma corrida.
+  - La primera vez recorre el destino entero; luego guarda un indice (`indice_destinos.json`) y en las siguientes corridas solo revisa los mensajes nuevos del destino.
+- Albumes:
+  - Los mensajes de un mismo album se envian juntos (hasta 10 archivos, el limite de Telegram), con el texto y formato de cada uno.
+  - Si un filtro descarta parte del album, el resto se envia junto igual.
+  - Si Telegram rechaza el album, sus archivos se envian de a uno.
 
 ## Estado, logs y archivos generados
 
@@ -210,6 +218,7 @@ Si la lista no se pudo cargar (por ejemplo, sin conexion), el asistente vuelve a
 | `bot_telegram.log` | Log general de ejecucion (INFO/WARNING/ERROR). |
 | `channel_states.json` | Ultimo mensaje procesado por par `origen->destino` (reanudar corrida). |
 | `failed_videos.json` | DLQ de mensajes que fallaron tras todos los reintentos. |
+| `indice_destinos.json` | Medios que ya hay en cada canal destino, para no recorrerlo entero en cada corrida. |
 | `<TELEGRAM_SESSION_NAME>.session` | Sesion guardada de Telegram, con tu API ID y hash. **Da acceso total a tu cuenta**: no la compartas ni la subas a git. |
 
 Ninguno de estos archivos existe hasta que inicias sesion, y `Cerrar sesion` los borra todos. El API ID y el API hash no tienen archivo propio: se guardan dentro del `.session` y desaparecen con el.
@@ -249,11 +258,13 @@ El bot puede enviar:
 
 ## Pruebas
 
-El proyecto incluye pruebas unitarias basicas:
+Para correr las pruebas en tu equipo:
 
 ```powershell
 uv run python -m unittest discover -s tests -v
 ```
+
+En GitHub corren solas en cada `push` y en cada pull request, en Windows y en Ubuntu (`.github/workflows/pruebas.yml`). El resultado aparece en la pestaña *Actions* del repositorio.
 
 ## Troubleshooting
 
@@ -292,8 +303,9 @@ uv run python -m unittest discover -s tests -v
 
 ### Duplicados tarda mucho
 
-- La deduplicacion recorre historial de destino; en canales grandes puede tardar.
-- Si prefieres velocidad, prueba `EVITAR_DUPLICADOS=False`.
+- La primera revision de un destino lo recorre entero; en canales grandes puede tardar unos minutos. Las siguientes solo revisan los mensajes nuevos.
+- Si borraste mensajes del destino y quieres que el bot vuelva a copiarlos, borra `indice_destinos.json`: la proxima corrida revisara el destino completo.
+- Si prefieres no revisar duplicados, usa `EVITAR_DUPLICADOS=False`.
 
 ## Buenas practicas
 

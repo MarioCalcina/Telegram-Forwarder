@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock
 
 from telegram_fakes import mensaje_video
 from telethon.errors import ServerError
-from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MediaCaptionTooLongError
+from telethon.errors.rpcerrorlist import (
+    ChatForwardsRestrictedError,
+    MediaCaptionTooLongError,
+    MediaInvalidError,
+)
+from telethon.tl import types
 
 from reenviador.fallidos.cola_fallidos import DeadLetterQueue
 from reenviador.reenvio.enviador import MessageSender
@@ -65,6 +70,26 @@ class MessageSenderTestCase(unittest.TestCase):
         self.assertFalse(self._enviar())
         self.assertEqual(self.telethon.send_message.await_count, 1)
         self.assertEqual(self.dlq.get_failed_videos()[0]["retry_count"], 0)
+
+    def test_album_conserva_el_texto_y_formato_de_cada_archivo(self) -> None:
+        negrita = [types.MessageEntityBold(offset=0, length=4)]
+        mensajes = [mensaje_video(1, grouped_id=7, texto="Hola mundo"), mensaje_video(2, grouped_id=7)]
+        mensajes[0].entities = negrita
+
+        self.assertTrue(asyncio.run(self.sender.enviar_album("destino", mensajes, topic_id=55)))
+
+        args, kwargs = self.telethon.send_file.await_args
+        self.assertEqual(args[1], [mensaje.media for mensaje in mensajes])
+        self.assertEqual(kwargs["caption"], ["Hola mundo", ""])
+        self.assertEqual(kwargs["formatting_entities"], [negrita, []])
+        self.assertEqual(kwargs["reply_to"], 55)
+
+    def test_album_que_falla_no_va_a_la_dlq(self) -> None:
+        # Quien llama lo reenvia de a uno, y ese camino es el que registra los fallos.
+        self.telethon.send_file.side_effect = MediaInvalidError(request=None)
+
+        self.assertFalse(asyncio.run(self.sender.enviar_album("destino", [mensaje_video(1), mensaje_video(2)])))
+        self.assertEqual(self.dlq.get_count(), 0)
 
 
 if __name__ == "__main__":

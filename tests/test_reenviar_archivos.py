@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import patch
 
 from telegram_fakes import mensaje_video
-from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError
+from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MediaInvalidError
 from tqdm import tqdm
 
 from reenviador.fallidos.cola_fallidos import DeadLetterQueue
@@ -22,15 +22,23 @@ from reenviador.progreso.repositorio_estado import ChannelStateRepository
 from reenviador.reenvio import reenviar_archivos
 from reenviador.reenvio.enviador import MessageSender
 from reenviador.reenvio.modelo import ConfirmarEnvio, Estadisticas, ParPorCopiar
+from reenviador.seleccion.indice_destinos import IndiceDeDestinos
 
 
 class FakeTelethon:
-    """Imita send_message de TelegramClient y registra cada intento."""
+    """Imita send_message y send_file de TelegramClient y registra cada intento."""
 
-    def __init__(self, fallar_en: set[int] | None = None, cancelar_en: set[int] | None = None):
+    def __init__(
+        self,
+        fallar_en: set[int] | None = None,
+        cancelar_en: set[int] | None = None,
+        albumes_fallan: bool = False,
+    ):
         self.intentos: list[int] = []
+        self.albumes: list[list[int]] = []
         self.fallar_en = fallar_en or set()
         self.cancelar_en = cancelar_en or set()
+        self.albumes_fallan = albumes_fallan
 
     async def send_message(self, entidad: Any, mensaje: Any, **kwargs: Any) -> None:
         if mensaje.id in self.cancelar_en:
@@ -39,6 +47,12 @@ class FakeTelethon:
         self.intentos.append(mensaje.id)
         if mensaje.id in self.fallar_en:
             raise ChatForwardsRestrictedError(request=None)
+
+    async def send_file(self, entidad: Any, archivos: Any, **kwargs: Any) -> None:
+        # En telegram_fakes el ID del documento es el del mensaje * 100.
+        self.albumes.append([media.document.id // 100 for media in archivos])
+        if self.albumes_fallan:
+            raise MediaInvalidError(request=None)
 
 
 class FakeClientWrapper:
@@ -74,6 +88,7 @@ class ReenvioTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.estado_path = str(Path(tmp.name) / "estado.json")
         self.dlq_path = str(Path(tmp.name) / "failed.json")
+        self.indice_path = str(Path(tmp.name) / "indice.json")
 
         # Aisla los tests de los valores del .env local.
         for nombre, valor in {
@@ -116,7 +131,7 @@ class ReenvioTestCase(unittest.TestCase):
                 min_duracion_segundos=0,
                 min_duracion_video_minutos=0,
                 stats=stats,
-                medios_destino_cache={},
+                indice_destinos=IndiceDeDestinos(self.indice_path),
                 palabras_clave=set(),
                 tipos_archivo={"video"},
                 topic_id_origen=None,
@@ -205,6 +220,44 @@ class ReenvioTestCase(unittest.TestCase):
             )
 
         self.assertEqual(self._ultimo_id_guardado(), 3)
+
+    def test_album_se_envia_junto_y_lo_demas_de_a_uno(self) -> None:
+        mensajes = {
+            1: mensaje_video(1),
+            2: mensaje_video(2, grouped_id=77),
+            3: mensaje_video(3, grouped_id=77),
+            4: mensaje_video(4, grouped_id=77),
+            5: mensaje_video(5),
+        }
+        telethon = FakeTelethon()
+
+        stats = self._correr(FakeClientWrapper(mensajes), telethon)
+
+        self.assertEqual(telethon.albumes, [[2, 3, 4]])
+        self.assertEqual(telethon.intentos, [1, 5])
+        self.assertEqual(stats.copiados, 5)
+        self.assertEqual(self._ultimo_id_guardado(), 5)
+
+    def test_si_el_album_falla_se_envia_archivo_por_archivo(self) -> None:
+        mensajes = {i: mensaje_video(i, grouped_id=77) for i in (1, 2, 3)}
+        telethon = FakeTelethon(albumes_fallan=True)
+
+        stats = self._correr(FakeClientWrapper(mensajes), telethon)
+
+        self.assertEqual(telethon.albumes, [[1, 2, 3]])
+        self.assertEqual(telethon.intentos, [1, 2, 3])
+        self.assertEqual((stats.copiados, stats.fallidos), (3, 0))
+        self.assertEqual(DeadLetterQueue(self.dlq_path).get_failed_message_ids("o", "d"), [])
+
+    def test_ctrl_c_a_mitad_del_envio_de_a_uno_guarda_lo_que_ya_salio(self) -> None:
+        mensajes = {i: mensaje_video(i, grouped_id=77) for i in (1, 2, 3)}
+        telethon = FakeTelethon(albumes_fallan=True, cancelar_en={3})
+
+        with self.assertRaises(asyncio.CancelledError):
+            self._correr(FakeClientWrapper(mensajes), telethon)
+
+        self.assertEqual(telethon.intentos, [1, 2])
+        self.assertEqual(self._ultimo_id_guardado(), 2)
 
     def test_fallido_se_reintenta_en_la_siguiente_corrida(self) -> None:
         mensajes = {i: mensaje_video(i) for i in (10, 11, 12)}
