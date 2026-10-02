@@ -10,7 +10,12 @@ from telethon.tl import types
 logging.getLogger("telegram_bot").addHandler(logging.NullHandler())
 
 
-def mensaje_con_documento(message_id: int, attributes: list[Any]) -> types.Message:
+def mensaje_con_documento(
+    message_id: int,
+    attributes: list[Any],
+    grouped_id: int | None = None,
+    texto: str = "",
+) -> types.Message:
     documento = types.Document(
         id=message_id * 100,
         access_hash=0,
@@ -25,15 +30,23 @@ def mensaje_con_documento(message_id: int, attributes: list[Any]) -> types.Messa
         id=message_id,
         peer_id=types.PeerChannel(1),
         date=None,
-        message="",
+        message=texto,
         media=types.MessageMediaDocument(document=documento),
+        grouped_id=grouped_id,  # mensajes con el mismo grouped_id forman un album
     )
 
 
-def mensaje_video(message_id: int, duracion: int = 600) -> types.Message:
+def mensaje_video(
+    message_id: int,
+    duracion: int = 600,
+    grouped_id: int | None = None,
+    texto: str = "",
+) -> types.Message:
     return mensaje_con_documento(
         message_id,
         [types.DocumentAttributeVideo(duration=duracion, w=1, h=1)],
+        grouped_id=grouped_id,
+        texto=texto,
     )
 
 

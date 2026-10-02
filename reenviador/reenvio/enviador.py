@@ -64,6 +64,25 @@ class MessageSender:
             self._registrar_fallo(mensaje, canal_origen, canal_destino, exc)
             return False
 
+    async def enviar_album(
+        self,
+        entidad_destino: Any,
+        mensajes: list[Any],
+        topic_id: int | None = None,
+    ) -> bool:
+        """
+        Envia juntos los mensajes de un album, con el texto y el formato de cada uno.
+
+        Si falla retorna False sin registrar nada: quien llama los envia de a uno, y ese
+        camino ya maneja los captions largos y la DLQ de cada mensaje.
+        """
+        try:
+            await self._ejecutar_con_reintentos(self._send_album_internal, entidad_destino, mensajes, topic_id)
+            return True
+        except Exception as exc:
+            logger.warning("No se pudo enviar el album completo (%s): se envia archivo por archivo.", exc)
+            return False
+
     async def _ejecutar_con_reintentos(self, func: Any, *args: Any) -> None:
         """Ejecuta un envio reintentando errores pasajeros y respetando un FloodWait."""
         try:
@@ -77,6 +96,22 @@ class MessageSender:
         """Envia el mensaje (metodo interno para retry)."""
         kwargs = {"reply_to": topic_id} if topic_id else {}
         await self.client.send_message(entidad_destino, mensaje, **kwargs)
+
+    async def _send_album_internal(
+        self,
+        entidad_destino: Any,
+        mensajes: list[Any],
+        topic_id: int | None,
+    ) -> None:
+        """Envia varios medios como un solo album (metodo interno para retry)."""
+        kwargs = {"reply_to": topic_id} if topic_id else {}
+        await self.client.send_file(
+            entidad_destino,
+            [mensaje.media for mensaje in mensajes],
+            caption=[mensaje.message or "" for mensaje in mensajes],
+            formatting_entities=[mensaje.entities or [] for mensaje in mensajes],
+            **kwargs,
+        )
 
     async def _send_file_internal(
         self,

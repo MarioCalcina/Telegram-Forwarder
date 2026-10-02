@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from reenviador.sesion import datos_locales
+from reenviador.seleccion.indice_destinos import ARCHIVO_INDICE_DESTINOS
 from reenviador.sesion.sesion_guardada import SesionGuardada
 
 HASH = "0123456789abcdef0123456789abcdef"
@@ -79,6 +80,9 @@ class DatosLocalesTestCase(unittest.TestCase):
                 datos_locales.borrar_datos_locales()
 
             self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_cerrar_sesion_tambien_borra_el_indice_de_destinos(self) -> None:
+        self.assertIn(Path(ARCHIVO_INDICE_DESTINOS), datos_locales.ARCHIVOS_GENERADOS)
 
 
 if __name__ == "__main__":

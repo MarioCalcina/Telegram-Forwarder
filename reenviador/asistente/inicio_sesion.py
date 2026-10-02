@@ -115,8 +115,8 @@ def _elegir_continuar_con(cuenta: str) -> bool:
         if opcion in {"", "1"}:
             return True
         if opcion == "2":
-            ui.info("Cerrar sesion deja el proyecto limpio: borra la sesion y tu API ID/hash,")
-            ui.info("el progreso, los mensajes fallidos y el log de este equipo.")
+            ui.info("Cerrar sesion deja el proyecto limpio: borra la sesion y tu API ID/hash, el")
+            ui.info("progreso, los mensajes fallidos, el indice de duplicados y el log de este equipo.")
             if ui.preguntar_si_no("Confirmas cerrar sesion", default=False):
                 return False
             continue
